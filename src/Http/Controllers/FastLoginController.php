@@ -3,12 +3,14 @@
 namespace M1guelpf\FastLogin\Http\Controllers;
 
 use Cose\Algorithms;
+use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Http\Request;
 use InvalidArgumentException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\UnauthorizedException;
+use M1guelpf\FastLogin\Events\FastLoginLogIn;
 use M1guelpf\FastLogin\FastLoginServiceProvider;
 use Webauthn\PublicKeyCredentialDescriptor as Credential;
 use Webauthn\PublicKeyCredentialRpEntity as RelyingParty;
@@ -26,7 +28,13 @@ use Webauthn\AuthenticatorAttestationResponseValidator as RegistrationValidator;
 
 class FastLoginController
 {
-    public function createDetails(Request $request)
+	/**
+	 * @param  \Illuminate\Http\Request  $request
+	 *
+	 * @return mixed
+	 * @throws \Exception
+	 */
+	public function createDetails(Request $request)
     {
         return tap(CreationRequest::create(
             new RelyingParty(config('app.name'), $request->getHttpHost()),
@@ -45,7 +53,15 @@ class FastLoginController
         })->toArray()), fn ($creationOptions) => Cache::put($this->getCacheKey(), $creationOptions->jsonSerialize(), now()->addMinutes(5)))->jsonSerialize();
     }
 
-    public function create(Request $request, CredentialLoader $credentialLoader, RegistrationValidator $registrationValidator, CredentialRequest $credentialRequest)
+	/**
+	 * @param  \Illuminate\Http\Request  $request
+	 * @param  \Webauthn\PublicKeyCredentialLoader  $credentialLoader
+	 * @param  \Webauthn\AuthenticatorAttestationResponseValidator  $registrationValidator
+	 * @param  \Psr\Http\Message\ServerRequestInterface  $credentialRequest
+	 *
+	 * @return mixed
+	 */
+	public function create(Request $request, CredentialLoader $credentialLoader, RegistrationValidator $registrationValidator, CredentialRequest $credentialRequest)
     {
         $credentials     = $credentialLoader->loadArray($request->all())->getResponse();
         $creationOptions = CreationRequest::createFromArray(Cache::pull($this->getCacheKey()));
@@ -70,7 +86,13 @@ class FastLoginController
         return response()->noContent();
     }
 
-    public function loginDetails(Request $request)
+	/**
+	 * @param  \Illuminate\Http\Request  $request
+	 *
+	 * @return mixed
+	 * @throws \Exception
+	 */
+	public function loginDetails(Request $request)
     {
         return tap(
             LoginRequest::create(random_bytes(16))
@@ -80,7 +102,15 @@ class FastLoginController
         )->jsonSerialize();
     }
 
-    public function login(Request $request, CredentialLoader $credentialLoader, LoginValidator $loginValidator, CredentialRequest $credentialRequest)
+	/**
+	 * @param  \Illuminate\Http\Request  $request
+	 * @param  \Webauthn\PublicKeyCredentialLoader  $credentialLoader
+	 * @param  \Webauthn\AuthenticatorAssertionResponseValidator  $loginValidator
+	 * @param  \Psr\Http\Message\ServerRequestInterface  $credentialRequest
+	 *
+	 * @return mixed
+	 */
+	public function login(Request $request, CredentialLoader $credentialLoader, LoginValidator $loginValidator, CredentialRequest $credentialRequest)
     {
         $credentials    = $credentialLoader->loadArray($request->all())->getResponse();
         $requestOptions = LoginRequest::createFromArray(Cache::pull($this->getCacheKey()));
@@ -95,12 +125,20 @@ class FastLoginController
             throw new UnauthorizedException('FastLogin: Failed validating request', 422, $e);
         }
 
-        Auth::loginUsingId(intval($response->getUserHandle()));
+		$authenticatable = Auth::loginUsingId(intval($response->getUserHandle()));
+
+        if ($authenticatable instanceof Authenticatable) {
+        	// Dispatch event that we have logged in via FastLogin.
+        	FastLoginLogIn::dispatch($authenticatable);
+		}
 
         return response()->noContent();
     }
 
-    protected function getCacheKey()
+	/**
+	 * @return string
+	 */
+	protected function getCacheKey()
     {
         return 'fastlogin-request-' . sha1(request()->getHttpHost() . request()->session()->token());
     }
