@@ -35,23 +35,37 @@ class FastLoginController
 	 * @throws \Exception
 	 */
 	public function createDetails(Request $request)
-    {
-        return tap(CreationRequest::create(
-            new RelyingParty(config('app.name'), $request->getHttpHost()),
-            new UserEntity(
-                $request->user()->email,
-                $request->user()->id,
-                $request->user()->name,
-            ),
-            random_bytes(16),
-            [
-                new CredentialParameter(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, Algorithms::COSE_ALGORITHM_ES256),
-                new CredentialParameter(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, Algorithms::COSE_ALGORITHM_RS256),
-            ],
-        )->setAuthenticatorSelection(new Authenticator('platform'))->excludeCredentials($request->user()->webauthnCredentials->map(function ($credential) {
-            return new Credential(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, $credential['credId'], ['internal']);
-        })->toArray()), fn ($creationOptions) => Cache::put($this->getCacheKey(), $creationOptions->jsonSerialize(), now()->addMinutes(5)))->jsonSerialize();
-    }
+	{
+		$creationRequest = CreationRequest::create(
+			new RelyingParty(config('app.name'), $request->getHttpHost()),
+			new UserEntity(
+				$request->user()->email,
+				$request->user()->id,
+				$request->user()->name,
+			),
+			random_bytes(16),
+			[
+				new CredentialParameter(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, Algorithms::COSE_ALGORITHM_ES256),
+				new CredentialParameter(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, Algorithms::COSE_ALGORITHM_RS256),
+			],
+		)->setAuthenticatorSelection(
+			new Authenticator('platform')
+		);
+
+		$request->user()->webauthnCredentials->each(function ($credential) use ($creationRequest) {
+			$creationRequest->excludeCredential(
+				new Credential(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, $credential['credId'], ['internal'])
+			);
+		});
+
+		Cache::put(
+			$this->getCacheKey(),
+			$creationRequest->jsonSerialize(),
+			now()->addMinutes(5)
+		);
+
+		return $creationRequest->jsonSerialize();
+	}
 
 	/**
 	 * @param  \Illuminate\Http\Request  $request
@@ -62,29 +76,29 @@ class FastLoginController
 	 * @return mixed
 	 */
 	public function create(Request $request, CredentialLoader $credentialLoader, RegistrationValidator $registrationValidator, CredentialRequest $credentialRequest)
-    {
-        $credentials     = $credentialLoader->loadArray($request->all())->getResponse();
-        $creationOptions = CreationRequest::createFromArray(Cache::pull($this->getCacheKey()));
+	{
+		$credentials     = $credentialLoader->loadArray($request->all())->getResponse();
+		$creationOptions = CreationRequest::createFromArray(Cache::pull($this->getCacheKey()));
 
-        if (!$creationOptions || !$credentials instanceof RegistrationResponse) {
-            throw new UnauthorizedException('FastLogin: Failed validating request', 422);
-        }
+		if (!$creationOptions || !$credentials instanceof RegistrationResponse) {
+			throw new UnauthorizedException('FastLogin: Failed validating request', 422);
+		}
 
-        try {
-            $response = $registrationValidator->check($credentials, $creationOptions, $credentialRequest, [$creationOptions->getRp()->getId()]);
-        } catch (InvalidArgumentException $e) {
-            throw new UnauthorizedException('FastLogin: Failed validating request', 422, $e);
-        }
+		try {
+			$response = $registrationValidator->check($credentials, $creationOptions, $credentialRequest, [$creationOptions->getRp()->getId()]);
+		} catch (InvalidArgumentException $e) {
+			throw new UnauthorizedException('FastLogin: Failed validating request', 422, $e);
+		}
 
-        $request->user()->webauthnCredentials()->create([
-            'credId' => $credId = $response->getPublicKeyCredentialId(),
-            'key'    => $response->getCredentialPublicKey(),
-        ]);
+		$request->user()->webauthnCredentials()->create([
+			'credId' => $credId = $response->getPublicKeyCredentialId(),
+			'key'    => $response->getCredentialPublicKey(),
+		]);
 
-        cookie()->queue(FastLoginServiceProvider::FASTLOGIN_COOKIE, $credId, 1 * Carbon::DAYS_PER_YEAR * Carbon::HOURS_PER_DAY * Carbon::MINUTES_PER_HOUR);
+		cookie()->queue(FastLoginServiceProvider::FASTLOGIN_COOKIE, $credId, 1 * Carbon::DAYS_PER_YEAR * Carbon::HOURS_PER_DAY * Carbon::MINUTES_PER_HOUR);
 
-        return response()->noContent();
-    }
+		return response()->noContent();
+	}
 
 	/**
 	 * @param  \Illuminate\Http\Request  $request
@@ -93,14 +107,14 @@ class FastLoginController
 	 * @throws \Exception
 	 */
 	public function loginDetails(Request $request)
-    {
-        return tap(
-            LoginRequest::create(random_bytes(16))
-                ->setRpId($request->getHttpHost())
-                ->allowCredential(new Credential(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, $request->cookie(FastLoginServiceProvider::FASTLOGIN_COOKIE), ['internal'])),
-            fn ($requestOptions) => Cache::put($this->getCacheKey(), $requestOptions->jsonSerialize(), now()->addMinutes(5))
-        )->jsonSerialize();
-    }
+	{
+		return tap(
+			LoginRequest::create(random_bytes(16))
+				->setRpId($request->getHttpHost())
+				->allowCredential(new Credential(Credential::CREDENTIAL_TYPE_PUBLIC_KEY, $request->cookie(FastLoginServiceProvider::FASTLOGIN_COOKIE), ['internal'])),
+			fn ($requestOptions) => Cache::put($this->getCacheKey(), $requestOptions->jsonSerialize(), now()->addMinutes(5))
+		)->jsonSerialize();
+	}
 
 	/**
 	 * @param  \Illuminate\Http\Request  $request
@@ -111,35 +125,35 @@ class FastLoginController
 	 * @return mixed
 	 */
 	public function login(Request $request, CredentialLoader $credentialLoader, LoginValidator $loginValidator, CredentialRequest $credentialRequest)
-    {
-        $credentials    = $credentialLoader->loadArray($request->all())->getResponse();
-        $requestOptions = LoginRequest::createFromArray(Cache::pull($this->getCacheKey()));
+	{
+		$credentials    = $credentialLoader->loadArray($request->all())->getResponse();
+		$requestOptions = LoginRequest::createFromArray(Cache::pull($this->getCacheKey()));
 
-        if (!$requestOptions || !$credentials instanceof LoginResponse) {
-            throw new UnauthorizedException('FastLogin: Failed validating request', 422);
-        }
+		if (!$requestOptions || !$credentials instanceof LoginResponse) {
+			throw new UnauthorizedException('FastLogin: Failed validating request', 422);
+		}
 
-        try {
-            $response = $loginValidator->check($request->cookie(FastLoginServiceProvider::FASTLOGIN_COOKIE), $credentials, $requestOptions, $credentialRequest, null, [$requestOptions->getRpId()]);
-        } catch (InvalidArgumentException $e) {
-            throw new UnauthorizedException('FastLogin: Failed validating request', 422, $e);
-        }
+		try {
+			$response = $loginValidator->check($request->cookie(FastLoginServiceProvider::FASTLOGIN_COOKIE), $credentials, $requestOptions, $credentialRequest, null, [$requestOptions->getRpId()]);
+		} catch (InvalidArgumentException $e) {
+			throw new UnauthorizedException('FastLogin: Failed validating request', 422, $e);
+		}
 
 		$authenticatable = Auth::loginUsingId(intval($response->getUserHandle()));
 
-        if ($authenticatable instanceof Authenticatable) {
-        	// Dispatch event that we have logged in via FastLogin.
-        	FastLoginLogIn::dispatch($authenticatable);
+		if ($authenticatable instanceof Authenticatable) {
+			// Dispatch event that we have logged in via FastLogin.
+			FastLoginLogIn::dispatch($authenticatable);
 		}
 
-        return response()->noContent();
-    }
+		return response()->noContent();
+	}
 
 	/**
 	 * @return string
 	 */
 	protected function getCacheKey()
-    {
-        return 'fastlogin-request-' . sha1(request()->getHttpHost() . request()->session()->token());
-    }
+	{
+		return 'fastlogin-request-' . sha1(request()->getHttpHost() . request()->session()->token());
+	}
 }
